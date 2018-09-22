@@ -270,6 +270,6 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	}
 
 	private void addToAthenaQueue(String query) {
-		ddlQueue.add(query);
+		ddlQueue.offerLast(query);
 	}
 }
