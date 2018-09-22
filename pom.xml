@@ -1,44 +1,46 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
 
-    <groupId>il.amazon.bigdata.sa</groupId>
-    <artifactId>athenaSync</artifactId>
-    <version>1.0-SNAPSHOT</version>
-
-    <repositories>
-        <repository>
-            <id>local-files</id>
-            <name>local-files</name>
-            <url>file:///tmp/repo</url>
-        </repository>
-    </repositories>
-
-    <dependencies>
-    <dependency>
-        <groupId>org.apache.hive</groupId>
-        <artifactId>hive-metastore</artifactId>
-        <version>2.1.1</version>
-    </dependency>
-
-    <dependency>
-        <groupId>com.amazonaws</groupId>
-        <artifactId>aws-java-sdk</artifactId>
-        <version>1.11.92</version>
-    </dependency>
-
-        <dependency>
-            <groupId>org.apache.hive</groupId>
-            <artifactId>hive-jdbc</artifactId>
-            <version>2.1.0</version>
-        </dependency>
-
-        <dependency>
-            <groupId>com.amazon</groupId>
-            <artifactId>AthenaJDBC</artifactId>
-            <version>41-1.0.0</version>
-        </dependency>
-</dependencies>
+	<groupId>il.amazon.bigdata.sa</groupId>
+	<artifactId>athenaSync</artifactId>
+	<version>1.0-SNAPSHOT</version>
+	<repositories>
+		<repository>
+			<id>Atlassian</id>
+			<url>https://maven.atlassian.com/3rdparty</url>
+		</repository>
+	</repositories>
+	<dependencies>
+		<dependency>
+			<groupId>org.apache.hive</groupId>
+			<artifactId>hive-metastore</artifactId>
+			<version>2.1.1</version>
+		</dependency>
+		<dependency>
+			<groupId>com.amazonaws</groupId>
+			<artifactId>aws-java-sdk-core</artifactId>
+			<version>${aws-java-sdk-version}</version>
+		</dependency>
+		<dependency>
+			<groupId>com.amazonaws</groupId>
+			<artifactId>aws-java-sdk-glue</artifactId>
+			<version>${aws-java-sdk-version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.hive</groupId>
+			<artifactId>hive-jdbc</artifactId>
+			<version>3.1.0</version>
+		</dependency>
+		<dependency>
+			<groupId>com.amazonaws.athena.jdbc</groupId>
+			<artifactId>atl-athena-jdbc-driver</artifactId>
+			<version>1.0.2-atlassian-1</version>
+		</dependency>
+	</dependencies>
+	<properties>
+		<aws-java-sdk-version>1.11.414</aws-java-sdk-version>
+	</properties>
 </project>
