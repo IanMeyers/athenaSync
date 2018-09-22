@@ -10,6 +10,7 @@ import java.util.Properties;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.metastore.MetaStoreEventListener;
+import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
@@ -23,6 +24,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	private static Configuration config = null;
 	private Statement athenaStmt;
 	private Connection hiveMetastoreConnection;
+	private final String EXTERNAL_TABLE_TYPE = "EXTERNAL_TABLE";
 
 	private final class ConnectionCloser implements Runnable {
 		private Connection[] connections;
@@ -62,7 +64,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		athenaStmt = athenaConnection.createStatement();
 
 		// Get the hive metastore URL from properties
-		String hiveMetastoreURL = System.getProperty("hive-metastore-url");
+		String hiveMetastoreURL = config.get("hive-metastore-url");
 
 		if (hiveMetastoreURL == null) {
 			hiveMetastoreURL = "jdbc:hive2://localhost:10000/default";
@@ -74,8 +76,8 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		connections[0] = athenaConnection;
 		connections[1] = hiveMetastoreConnection;
 		Runtime.getRuntime().addShutdownHook(new Thread(new ConnectionCloser(connections, LOG), "Shutdown-thread"));
-		
-		LOG.info(String.format("HiveGlueCatalogSyncAgent online, connected to %s and %s",hiveMetastoreURL,athenaURL));
+
+		LOG.info(String.format("HiveGlueCatalogSyncAgent online, connected to %s and %s", hiveMetastoreURL, athenaURL));
 	}
 
 	// Trying to reconstruct the create table statement from the Table object
@@ -85,12 +87,13 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	// and issue a "show create table" statement on table which is later sent to
 	// Athena.
 	public void onCreateTable(CreateTableEvent tableEvent) {
-		Table tbl = tableEvent.getTable();
-		if (tbl.getTableType().equals("EXTERNAL_TABLE") && tbl.getSd().getLocation().startsWith("s3")) {
+		Table table = tableEvent.getTable();
+		if (table.getTableType().equals(EXTERNAL_TABLE_TYPE) && table.getSd().getLocation().startsWith("s3")) {
 			String ddl = "";
 			try {
 				Statement stmt = hiveMetastoreConnection.createStatement();
-				ResultSet res = stmt.executeQuery("show create table " + tbl.getDbName() + "." + tbl.getTableName());
+				ResultSet res = stmt
+						.executeQuery("show create table " + table.getDbName() + "." + table.getTableName());
 
 				while (res.next()) {
 					ddl += " " + res.getString(1);
@@ -101,37 +104,46 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 				LOG.error("Unable to replicate to AWS Glue Catalog:" + e.getMessage());
 			}
 
-			LOG.debug("DDL Statement:" + ddl);
+			LOG.debug(ddl);
 			sendToAthena(ddl);
 		} else {
-			LOG.debug(String.format("Ignoring Table %s as it should not be replicated to Athena. Type: %s",
-					tbl.getTableType(), tbl.getSd().getLocation()));
+			LOG.debug(String.format("Ignoring Table %s as it should not be replicated to AWS Glue Catalog. Type: %s",
+					table.getTableType(), table.getSd().getLocation()));
 		}
 	}
 
 	public void onAddPartition(AddPartitionEvent partitionEvent) throws MetaException {
 		if (partitionEvent.getStatus()) {
 			Table table = partitionEvent.getTable();
-			String fqtn = table.getDbName() + "." + table.getTableName();
 
-			if (fqtn != null && !fqtn.equals("")) {
-				Iterator<Partition> iterator = partitionEvent.getPartitionIterator();
-				while (iterator.hasNext()) {
-					Partition partition = iterator.next();
-					String partitionSpec = "";
-					for (int i = 0; i < table.getPartitionKeysSize(); ++i) {
-						if (table.getPartitionKeys().get(i).getType().equals("string"))
-							partitionSpec += table.getPartitionKeys().get(i).getName() + "='"
-									+ partition.getValues().get(i) + "',";
-						else
-							partitionSpec += table.getPartitionKeys().get(i).getName() + "="
-									+ partition.getValues().get(i) + ",";
+			if (table.getTableType().equals(EXTERNAL_TABLE_TYPE) && table.getSd().getLocation().startsWith("s3")) {
+				String fqtn = table.getDbName() + "." + table.getTableName();
+
+				if (fqtn != null && !fqtn.equals("")) {
+					Iterator<Partition> iterator = partitionEvent.getPartitionIterator();
+
+					while (iterator.hasNext()) {
+						Partition partition = iterator.next();
+						String partitionSpec = "";
+
+						for (int i = 0; i < table.getPartitionKeysSize(); ++i) {
+							FieldSchema p = table.getPartitionKeys().get(i);
+
+							if (p.getType().equals("string"))
+								partitionSpec += p.getName() + "='" + partition.getValues().get(i) + "',";
+							else
+								partitionSpec += p.getName() + "=" + partition.getValues().get(i) + ",";
+						}
+						partitionSpec = partitionSpec.substring(0, partitionSpec.length() - 1);
+						String addPartitionDDL = "alter table " + fqtn + " add if not exists partition(" + partitionSpec
+								+ ") location '" + partition.getSd().getLocation() + "'";
+						LOG.debug(addPartitionDDL);
+						sendToAthena(addPartitionDDL);
 					}
-					partitionSpec = partitionSpec.substring(0, partitionSpec.length() - 1);
-					sendToAthena("alter table " + fqtn + " add partition(" + partitionSpec + ") location '"
-							+ partition.getSd().getLocation() + "'");
 				}
-
+			} else {
+				LOG.debug(String.format("Ignoring Add Partition Event for Table %s as it is not stored on S3",
+						table.getTableName()));
 			}
 		}
 	}
