@@ -93,6 +93,10 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 				if (!ddlQueue.isEmpty()) {
 					String query = ddlQueue.removeFirst();
 
+					// log the query now so that the logfile will reflect when this is actually
+					// being run
+					LOG.info(query);
+
 					// implement an infinite retry - the queue will be building up, but we don't
 					// want to drop any ddl from being processed. At some point we'll run out of
 					// memory, but hopefully the connection will be reset before this is a problem
@@ -192,6 +196,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	}
 
 	private final void configureAthenaConnection() throws SQLException, SQLTimeoutException {
+		LOG.info(String.format("Connecting to Amazon Athena using endpoint %s", this.athenaURL));
 		athenaConnection = DriverManager.getConnection(this.athenaURL, this.info);
 	}
 
@@ -215,10 +220,9 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 
 				stmt.close();
 			} catch (Exception e) {
-				LOG.error("Unable to replicate to AWS Glue Catalog:" + e.getMessage());
+				LOG.error("Unable to get current Create Table statement for replication:" + e.getMessage());
 			}
 
-			LOG.debug(ddl);
 			addToAthenaQueue(ddl);
 		} else {
 			LOG.debug(String.format("Ignoring Table %s as it should not be replicated to AWS Glue Catalog. Type: %s",
@@ -258,7 +262,6 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 
 						String addPartitionDDL = "alter table " + fqtn + " add if not exists partition(" + partitionSpec
 								+ ") location '" + partition.getSd().getLocation() + "'";
-						LOG.debug(addPartitionDDL);
 						addToAthenaQueue(addPartitionDDL);
 					}
 				}
