@@ -21,22 +21,25 @@ import org.slf4j.LoggerFactory;
 public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	private static final Logger LOG = LoggerFactory.getLogger(HiveGlueCatalogSyncAgent.class);
 	private static Configuration config = null;
-	private Statement stmt;
+	private Statement athenaStmt;
+	private Connection hiveMetastoreConnection;
 
 	private final class ConnectionCloser implements Runnable {
-		private Connection c;
+		private Connection[] connections;
 		private Logger LOG;
 
-		protected ConnectionCloser(Connection c, Logger LOG) {
-			this.c = c;
+		protected ConnectionCloser(Connection[] connections, Logger LOG) {
+			this.connections = connections;
 			this.LOG = LOG;
 		}
 
 		public void run() {
-			try {
-				c.close();
-			} catch (SQLException e) {
-				LOG.error(e.getMessage());
+			for (Connection c : this.connections) {
+				try {
+					c.close();
+				} catch (SQLException e) {
+					LOG.error(e.getMessage());
+				}
 			}
 		}
 	};
@@ -54,11 +57,25 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		// info.put("password", config.get("athena.user.password"));
 		info.put("aws_credentials_provider_class",
 				com.amazonaws.auth.InstanceProfileCredentialsProvider.class.getName());
-		Connection conn = DriverManager.getConnection(config.get("athena.jdbc.url"), info);
-		stmt = conn.createStatement();
+		String athenaURL = config.get("athena.jdbc.url");
+		Connection athenaConnection = DriverManager.getConnection(athenaURL, info);
+		athenaStmt = athenaConnection.createStatement();
 
-		// add a shutdown hook to close the connection
-		Runtime.getRuntime().addShutdownHook(new Thread(new ConnectionCloser(conn, LOG), "Shutdown-thread"));
+		// Get the hive metastore URL from properties
+		String hiveMetastoreURL = System.getProperty("hive-metastore-url");
+
+		if (hiveMetastoreURL == null) {
+			hiveMetastoreURL = "jdbc:hive2://localhost:10000/default";
+		}
+		hiveMetastoreConnection = DriverManager.getConnection(hiveMetastoreURL);
+
+		// add a shutdown hook to close the connections
+		Connection[] connections = new Connection[2];
+		connections[0] = athenaConnection;
+		connections[1] = hiveMetastoreConnection;
+		Runtime.getRuntime().addShutdownHook(new Thread(new ConnectionCloser(connections, LOG), "Shutdown-thread"));
+		
+		LOG.info(String.format("HiveGlueCatalogSyncAgent online, connected to %s and %s",hiveMetastoreURL,athenaURL));
 	}
 
 	// Trying to reconstruct the create table statement from the Table object
@@ -72,14 +89,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		if (tbl.getTableType().equals("EXTERNAL_TABLE") && tbl.getSd().getLocation().startsWith("s3")) {
 			String ddl = "";
 			try {
-				// Get the hive metastore URL from properties
-				String hiveMetastoreURL = System.getProperty("hive-metastore-url");
-
-				if (hiveMetastoreURL == null) {
-					hiveMetastoreURL = "jdbc:hive2://localhost:10000/default";
-				}
-				Connection conn = DriverManager.getConnection(hiveMetastoreURL);
-				Statement stmt = conn.createStatement();
+				Statement stmt = hiveMetastoreConnection.createStatement();
 				ResultSet res = stmt.executeQuery("show create table " + tbl.getDbName() + "." + tbl.getTableName());
 
 				while (res.next()) {
@@ -87,7 +97,6 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 				}
 
 				stmt.close();
-				conn.close();
 			} catch (Exception e) {
 				LOG.error("Unable to replicate to AWS Glue Catalog:" + e.getMessage());
 			}
@@ -129,8 +138,8 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 
 	private void sendToAthena(String query) {
 		try {
-			stmt.execute(query);
-			stmt.close();
+			athenaStmt.execute(query);
+			athenaStmt.close();
 		} catch (Exception e) {
 			LOG.error("*** ERROR: " + e.getMessage());
 		}
