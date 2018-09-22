@@ -26,7 +26,7 @@ import com.amazonaws.athena.jdbc.shaded.org.apache.commons.lang3.StringUtils;
 
 public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	private static final Logger LOG = LoggerFactory.getLogger(HiveGlueCatalogSyncAgent.class);
-	private static Configuration config = null;
+	private Configuration config = null;
 	private Properties info;
 	private String athenaURL;
 	private Connection athenaConnection;
@@ -148,7 +148,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 			this.noEventSleepDuration = new Integer(noopSleepDuration).intValue();
 		}
 
-		String reconnectSleepDuration = this.config.get("reconnect-failed-sleep-duration");
+		String reconnectSleepDuration = conf.get("reconnect-failed-sleep-duration");
 		if (reconnectSleepDuration == null) {
 			this.reconnectSleepDuration = 1000;
 		} else {
