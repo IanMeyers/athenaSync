@@ -223,7 +223,9 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 				LOG.error("Unable to get current Create Table statement for replication:" + e.getMessage());
 			}
 
-			addToAthenaQueue(ddl);
+			if (!addToAthenaQueue(ddl)) {
+				LOG.error("Failed to add the CreateTable event to the processing queue");
+			}
 		} else {
 			LOG.debug(String.format("Ignoring Table %s as it should not be replicated to AWS Glue Catalog. Type: %s",
 					table.getTableType(), table.getSd().getLocation()));
@@ -262,7 +264,9 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 
 						String addPartitionDDL = "alter table " + fqtn + " add if not exists partition(" + partitionSpec
 								+ ") location '" + partition.getSd().getLocation() + "'";
-						addToAthenaQueue(addPartitionDDL);
+						if (!addToAthenaQueue(addPartitionDDL)) {
+							LOG.error("Failed to add the AddPartition event to the processing queue");
+						}
 					}
 				}
 			} else {
@@ -272,7 +276,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		}
 	}
 
-	private void addToAthenaQueue(String query) {
-		ddlQueue.offerLast(query);
+	private boolean addToAthenaQueue(String query) {
+		return ddlQueue.offerLast(query);
 	}
 }
