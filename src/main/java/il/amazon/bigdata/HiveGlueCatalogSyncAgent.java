@@ -4,8 +4,11 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLRecoverableException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.Properties;
 
 import org.apache.hadoop.conf.Configuration;
@@ -24,20 +27,37 @@ import com.amazonaws.athena.jdbc.shaded.org.apache.commons.lang3.StringUtils;
 public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	private static final Logger LOG = LoggerFactory.getLogger(HiveGlueCatalogSyncAgent.class);
 	private static Configuration config = null;
-	private Statement athenaStmt;
+	private Properties info;
+	private String athenaURL;
+	private Connection athenaConnection;
 	private Connection hiveMetastoreConnection;
 	private final String EXTERNAL_TABLE_TYPE = "EXTERNAL_TABLE";
+	private final String ATHENA_JDBC_URL = "athena.jdbc.url";
+	private LinkedList<String> ddlQueue = new LinkedList<>();
+	private int noEventSleepDuration;
+	private int reconnectSleepDuration;
 
-	private final class ConnectionCloser implements Runnable {
+	/**
+	 * Private class to cleanup the sync agent - to be used in a Runtime shutdown
+	 * hook
+	 * 
+	 * @author meyersi
+	 *
+	 */
+	private final class SyncAgentShutdownRoutine implements Runnable {
 		private Connection[] connections;
-		private Logger LOG;
+		private AthenaQueueProcessor p;
 
-		protected ConnectionCloser(Connection[] connections, Logger LOG) {
+		protected SyncAgentShutdownRoutine(Connection[] connections, AthenaQueueProcessor queueProcessor) {
 			this.connections = connections;
-			this.LOG = LOG;
+			this.p = queueProcessor;
 		}
 
 		public void run() {
+			// stop the queue processing thread
+			p.stop();
+
+			// close all the connections
 			for (Connection c : this.connections) {
 				try {
 					c.close();
@@ -48,22 +68,104 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		}
 	};
 
+	/**
+	 * Private class which processes the ddl queue and pushes the ddl through
+	 * Athena. If the Athena connection is broken, try and reconnect, and if not
+	 * then back off for a period of time and hope that the conneciton is fixed
+	 * 
+	 * @author meyersi
+	 *
+	 */
+	private final class AthenaQueueProcessor implements Runnable {
+		private boolean run = true;
+
+		/**
+		 * Method to send a shutdown message to the queue processor
+		 */
+		public void stop() {
+			LOG.info(String.format("Stopping %s", this.getClass().getCanonicalName()));
+			this.run = false;
+		}
+
+		public void run() {
+			// run forever or until stop is called
+			while (this.run) {
+				if (!ddlQueue.isEmpty()) {
+					String query = ddlQueue.removeFirst();
+
+					// implement an infinite retry - the queue will be building up, but we don't
+					// want to drop any ddl from being processed. At some point we'll run out of
+					// memory, but hopefully the connection will be reset before this is a problem
+					boolean completed = false;
+					while (!completed) {
+						try {
+							Statement athenaStmt = athenaConnection.createStatement();
+							athenaStmt.execute(query);
+							athenaStmt.close();
+							completed = true;
+						} catch (SQLException e) {
+							if (e instanceof SQLRecoverableException || e instanceof SQLTimeoutException) {
+								// attempt to reconnect to Athena
+								try {
+									configureAthenaConnection();
+								} catch (SQLException e1) {
+									// this will probably be because we can't open the connection
+									LOG.error(e1.getMessage());
+
+									try {
+										Thread.sleep(reconnectSleepDuration);
+									} catch (InterruptedException e2) {
+										e2.printStackTrace();
+									}
+								}
+							} else {
+								LOG.error(e.getMessage());
+							}
+						}
+					}
+				} else {
+					// put the thread to sleep for a configured duration
+					try {
+						LOG.debug(String.format("DDL Queue is empty. Sleeping for %s", noEventSleepDuration));
+						Thread.sleep(noEventSleepDuration);
+					} catch (InterruptedException e) {
+						LOG.error(e.getMessage());
+					}
+				}
+			}
+		}
+	}
+
 	public HiveGlueCatalogSyncAgent(final Configuration conf) throws Exception {
 		super(conf);
-		config = conf;
+		this.config = conf;
+		this.athenaURL = conf.get(ATHENA_JDBC_URL);
 
-		Properties info = new Properties();
-		info.put("s3_staging_dir", config.get("athena.s3.staging.dir"));
-		info.put("log_path", "/tmp/jdbc.log");
-		info.put("log_level", "ERROR");
+		String noopSleepDuration = this.config.get("no-event-sleep-duration");
+		if (noopSleepDuration == null) {
+			this.noEventSleepDuration = 1000;
+		} else {
+			this.noEventSleepDuration = new Integer(noopSleepDuration).intValue();
+		}
+
+		String reconnectSleepDuration = this.config.get("reconnect-failed-sleep-duration");
+		if (reconnectSleepDuration == null) {
+			this.reconnectSleepDuration = 1000;
+		} else {
+			this.reconnectSleepDuration = new Integer(noopSleepDuration).intValue();
+		}
+
+		this.info = new Properties();
+		this.info.put("s3_staging_dir", config.get("athena.s3.staging.dir"));
+		this.info.put("log_path", "/tmp/jdbc.log");
+		this.info.put("log_level", "ERROR");
 
 		// info.put("user", config.get("athena.user.name"));
 		// info.put("password", config.get("athena.user.password"));
-		info.put("aws_credentials_provider_class",
+		this.info.put("aws_credentials_provider_class",
 				com.amazonaws.auth.InstanceProfileCredentialsProvider.class.getName());
-		String athenaURL = config.get("athena.jdbc.url");
-		Connection athenaConnection = DriverManager.getConnection(athenaURL, info);
-		athenaStmt = athenaConnection.createStatement();
+
+		configureAthenaConnection();
 
 		// Get the hive metastore URL from properties
 		String hiveMetastoreURL = config.get("hive-metastore-url");
@@ -73,14 +175,24 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		}
 		hiveMetastoreConnection = DriverManager.getConnection(hiveMetastoreURL);
 
+		// start the queue processor thread
+		AthenaQueueProcessor athenaQueueProcessor = new AthenaQueueProcessor();
+		Thread queueProcessor = new Thread(athenaQueueProcessor);
+		queueProcessor.start();
+
 		// add a shutdown hook to close the connections
 		Connection[] connections = new Connection[2];
 		connections[0] = athenaConnection;
 		connections[1] = hiveMetastoreConnection;
-		Runtime.getRuntime().addShutdownHook(new Thread(new ConnectionCloser(connections, LOG), "Shutdown-thread"));
+		Runtime.getRuntime().addShutdownHook(
+				new Thread(new SyncAgentShutdownRoutine(connections, athenaQueueProcessor), "Shutdown-thread"));
 
 		LOG.info(String.format("%s online, connected to %s and %s", this.getClass().getCanonicalName(),
-				hiveMetastoreURL, athenaURL));
+				hiveMetastoreURL, this.athenaURL));
+	}
+
+	private final void configureAthenaConnection() throws SQLException, SQLTimeoutException {
+		athenaConnection = DriverManager.getConnection(this.athenaURL, this.info);
 	}
 
 	// Trying to reconstruct the create table statement from the Table object
@@ -107,7 +219,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 			}
 
 			LOG.debug(ddl);
-			sendToAthena(ddl);
+			addToAthenaQueue(ddl);
 		} else {
 			LOG.debug(String.format("Ignoring Table %s as it should not be replicated to AWS Glue Catalog. Type: %s",
 					table.getTableType(), table.getSd().getLocation()));
@@ -147,7 +259,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 						String addPartitionDDL = "alter table " + fqtn + " add if not exists partition(" + partitionSpec
 								+ ") location '" + partition.getSd().getLocation() + "'";
 						LOG.debug(addPartitionDDL);
-						sendToAthena(addPartitionDDL);
+						addToAthenaQueue(addPartitionDDL);
 					}
 				}
 			} else {
@@ -157,12 +269,7 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		}
 	}
 
-	private void sendToAthena(String query) {
-		try {
-			athenaStmt.execute(query);
-			athenaStmt.close();
-		} catch (Exception e) {
-			LOG.error("*** ERROR: " + e.getMessage());
-		}
+	private void addToAthenaQueue(String query) {
+		ddlQueue.add(query);
 	}
 }
