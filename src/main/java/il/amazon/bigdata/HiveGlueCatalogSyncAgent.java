@@ -19,6 +19,8 @@ import org.apache.hadoop.hive.metastore.events.CreateTableEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.amazonaws.athena.jdbc.shaded.org.apache.commons.lang3.StringUtils;
+
 public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 	private static final Logger LOG = LoggerFactory.getLogger(HiveGlueCatalogSyncAgent.class);
 	private static Configuration config = null;
@@ -77,15 +79,15 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 		connections[1] = hiveMetastoreConnection;
 		Runtime.getRuntime().addShutdownHook(new Thread(new ConnectionCloser(connections, LOG), "Shutdown-thread"));
 
-		LOG.info(String.format("HiveGlueCatalogSyncAgent online, connected to %s and %s", hiveMetastoreURL, athenaURL));
+		LOG.info(String.format("%s online, connected to %s and %s", this.getClass().getCanonicalName(),
+				hiveMetastoreURL, athenaURL));
 	}
 
 	// Trying to reconstruct the create table statement from the Table object
-	// requires too much work
-	// so I'm checking if the table is external and it's location is on S3, if so I
-	// connect via JDBC to Hive
-	// and issue a "show create table" statement on table which is later sent to
-	// Athena.
+	// requires too much work so I'm checking if the table is external and it's
+	// location is on S3, if so I connect via JDBC to Hive and issue a "show create
+	// table" statement on table which is later sent to Catalog via Athena
+	// connection.
 	public void onCreateTable(CreateTableEvent tableEvent) {
 		Table table = tableEvent.getTable();
 		if (table.getTableType().equals(EXTERNAL_TABLE_TYPE) && table.getSd().getLocation().startsWith("s3")) {
@@ -129,12 +131,19 @@ public class HiveGlueCatalogSyncAgent extends MetaStoreEventListener {
 						for (int i = 0; i < table.getPartitionKeysSize(); ++i) {
 							FieldSchema p = table.getPartitionKeys().get(i);
 
-							if (p.getType().equals("string"))
-								partitionSpec += p.getName() + "='" + partition.getValues().get(i) + "',";
-							else
-								partitionSpec += p.getName() + "=" + partition.getValues().get(i) + ",";
+							String specAppend;
+							if (p.getType().equals("string")) {
+								// add quotes to appended value
+								specAppend = "'" + partition.getValues().get(i) + "'";
+							} else {
+								// don't quote the appended value
+								specAppend = partition.getValues().get(i);
+							}
+
+							partitionSpec += p.getName() + "=" + specAppend + ",";
 						}
-						partitionSpec = partitionSpec.substring(0, partitionSpec.length() - 1);
+						partitionSpec = StringUtils.stripEnd(partitionSpec, ",");
+
 						String addPartitionDDL = "alter table " + fqtn + " add if not exists partition(" + partitionSpec
 								+ ") location '" + partition.getSd().getLocation() + "'";
 						LOG.debug(addPartitionDDL);
